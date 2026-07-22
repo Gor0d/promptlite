@@ -1,29 +1,49 @@
 """
 PromptLite — API REST com FastAPI
+Multi-provider (OpenAI + Anthropic/Claude).
 """
 
+import os
+import sys
+from typing import Literal
+
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
-import sys
-import os
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv()
+
+from core.optimizer import run_optimization, estimate_cost  # noqa: E402
+from core.providers import PROVIDER_MODELS, DEFAULT_MODEL  # noqa: E402
 
 app = FastAPI(
     title="PromptLite API",
     description="Otimizador de prompts para redução de tokens com preservação de intenção",
-    version="1.0.0"
+    version="2.0.0",
 )
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS: por padrão liberado; restrinja via env PROMPTLITE_CORS_ORIGINS (lista separada por vírgula).
+_origins = os.getenv("PROMPTLITE_CORS_ORIGINS", "*")
+allow_origins = ["*"] if _origins.strip() == "*" else [o.strip() for o in _origins.split(",")]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+Provider = Literal["openai", "anthropic"]
 
 
 class OptimizeRequest(BaseModel):
     prompt: str = Field(..., min_length=10, max_length=10000,
-                        example="Please help me summarize this text in a clear and concise way...")
+                        examples=["Please help me summarize this text in a clear and concise way..."])
     test_outputs: bool = Field(True, description="Testar equivalência de outputs no LLM (usa mais tokens)")
-    model: str = Field("gpt-4o-mini", description="Modelo LLM para testes")
+    provider: Provider = Field("openai", description="Provider do LLM")
+    model: str | None = Field(None, description="Modelo específico (default por provider se omitido)")
 
 
 class OptimizeResponse(BaseModel):
@@ -39,12 +59,16 @@ class OptimizeResponse(BaseModel):
     optimized_output: str
     techniques_applied: list
     grade: str
+    provider: str
+    model: str
     cost_saved_usd: float
 
 
 class BatchRequest(BaseModel):
     prompts: list[str] = Field(..., max_length=10)
     test_outputs: bool = False
+    provider: Provider = "openai"
+    model: str | None = None
 
 
 @app.get("/")
@@ -53,39 +77,39 @@ async def root():
         "name": "PromptLite",
         "description": "Otimizador de prompts — reduz tokens, preserva intenção",
         "author": "Emerson Guimarães — github.com/Gor0d",
-        "stack": ["FastAPI", "OpenAI", "tiktoken", "scikit-learn"],
-        "docs": "/docs"
+        "stack": ["FastAPI", "OpenAI", "Anthropic", "tiktoken", "scikit-learn"],
+        "docs": "/docs",
     }
 
 
 @app.get("/health")
 async def health():
-    api_key = os.getenv("OPENAI_API_KEY")
     return {
         "status": "healthy",
-        "openai_configured": bool(api_key),
-        "version": "1.0.0"
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "anthropic_configured": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "version": "2.0.0",
     }
+
+
+@app.get("/models")
+async def list_models():
+    """Lista os modelos disponíveis por provider e o default de cada um."""
+    return {"providers": PROVIDER_MODELS, "defaults": DEFAULT_MODEL}
 
 
 @app.post("/optimize", response_model=OptimizeResponse)
 async def optimize(request: OptimizeRequest):
-    """
-    Endpoint principal: otimiza um prompt e retorna métricas completas.
-
-    Pipeline:
-    1. Conta tokens originais com tiktoken
-    2. Extrai intenção core com LLM
-    3. Otimiza removendo redundâncias
-    4. Conta tokens otimizados
-    5. Testa outputs nos dois prompts (opcional)
-    6. Calcula similaridade semântica via embeddings
-    7. Computa grade final (A/B/C/D)
-    """
+    """Otimiza um prompt e retorna métricas completas."""
     try:
-        from core.optimizer import run_optimization, estimate_cost
-        result = run_optimization(request.prompt, test_outputs=request.test_outputs)
-        cost_saved = estimate_cost(result.tokens_saved, request.model)
+        result = await run_in_threadpool(
+            run_optimization,
+            request.prompt,
+            test_outputs=request.test_outputs,
+            provider=request.provider,
+            model=request.model,
+        )
+        cost_saved = estimate_cost(result.tokens_saved, result.model)
 
         return OptimizeResponse(
             original_prompt=result.original_prompt,
@@ -100,26 +124,31 @@ async def optimize(request: OptimizeRequest):
             optimized_output=result.optimized_output,
             techniques_applied=result.techniques_applied,
             grade=result.grade,
-            cost_saved_usd=round(cost_saved, 6)
+            provider=result.provider,
+            model=result.model,
+            cost_saved_usd=round(cost_saved, 6),
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/batch")
 async def batch_optimize(request: BatchRequest):
-    """
-    Otimiza múltiplos prompts de uma vez.
-    Útil para processar datasets de treinamento de LLMs.
-    """
-    from core.optimizer import run_optimization, estimate_cost
-
+    """Otimiza múltiplos prompts. Útil para datasets de treinamento."""
     results = []
     total_saved = 0
 
     for i, prompt in enumerate(request.prompts):
         try:
-            result = run_optimization(prompt, test_outputs=request.test_outputs)
+            result = await run_in_threadpool(
+                run_optimization,
+                prompt,
+                test_outputs=request.test_outputs,
+                provider=request.provider,
+                model=request.model,
+            )
             total_saved += result.tokens_saved
             results.append({
                 "index": i,
@@ -129,7 +158,7 @@ async def batch_optimize(request: BatchRequest):
                 "tokens_saved": result.tokens_saved,
                 "reduction_pct": result.reduction_pct,
                 "grade": result.grade,
-                "optimized_prompt": result.optimized_prompt
+                "optimized_prompt": result.optimized_prompt,
             })
         except Exception as e:
             results.append({"index": i, "status": "error", "error": str(e)})
@@ -137,20 +166,22 @@ async def batch_optimize(request: BatchRequest):
     return {
         "total_prompts": len(request.prompts),
         "total_tokens_saved": total_saved,
-        "results": results
+        "results": results,
     }
 
 
 @app.get("/benchmark")
-async def run_benchmark():
+async def run_benchmark(provider: Provider = "openai", model: str | None = None):
     """Executa otimização nos prompts do dataset de benchmark (sem testar outputs)."""
-    from core.optimizer import run_optimization
     from data.benchmark_prompts import BENCHMARK_PROMPTS
 
     results = []
     for p in BENCHMARK_PROMPTS:
         try:
-            result = run_optimization(p["prompt"], test_outputs=False)
+            result = await run_in_threadpool(
+                run_optimization, p["prompt"], test_outputs=False,
+                provider=provider, model=model,
+            )
             results.append({
                 "id": p["id"],
                 "domain": p["domain"],
@@ -159,12 +190,13 @@ async def run_benchmark():
                 "optimized_tokens": result.optimized_tokens,
                 "reduction_pct": result.reduction_pct,
                 "intention_score": result.intention_score,
-                "grade": result.grade
+                "grade": result.grade,
             })
         except Exception as e:
             results.append({"id": p["id"], "error": str(e)})
 
-    avg_reduction = sum(r.get("reduction_pct", 0) for r in results) / len(results)
+    valid = [r for r in results if "error" not in r]
+    avg_reduction = (sum(r["reduction_pct"] for r in valid) / len(valid)) if valid else 0
     return {"results": results, "avg_reduction_pct": round(avg_reduction, 1)}
 
 

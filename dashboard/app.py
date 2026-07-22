@@ -1,14 +1,17 @@
 """
 PromptLite — Dashboard Streamlit
+Multi-provider (OpenAI + Anthropic/Claude).
 """
 
-import streamlit as st
-import requests
 import json
+import os
+
+import requests
+import streamlit as st
 
 st.set_page_config(page_title="PromptLite", page_icon="⚡", layout="wide")
 
-API_URL = "http://localhost:8000"
+API_URL = os.getenv("PROMPTLITE_API_URL", "http://localhost:8000")
 
 st.markdown("""
 <style>
@@ -24,6 +27,23 @@ st.markdown("""
 
 st.markdown("# ⚡ PromptLite")
 st.markdown("##### Otimize prompts · Reduza tokens · Preserve intenção")
+
+
+@st.cache_data(ttl=60)
+def fetch_models():
+    try:
+        r = requests.get(f"{API_URL}/models", timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except requests.exceptions.RequestException:
+        pass
+    return {
+        "providers": {"openai": ["gpt-4o-mini"], "anthropic": ["claude-haiku-4-5"]},
+        "defaults": {"openai": "gpt-4o-mini", "anthropic": "claude-haiku-4-5"},
+    }
+
+
+models_info = fetch_models()
 
 tab1, tab2, tab3 = st.tabs(["🔧 Otimizador", "📊 Benchmark", "📚 Técnicas"])
 
@@ -44,8 +64,14 @@ with tab1:
             "Seu prompt:",
             value=examples[selected],
             height=200,
-            placeholder="Cole aqui um prompt verboso para otimizar..."
+            placeholder="Cole aqui um prompt verboso para otimizar...",
         )
+
+        cprov, cmodel = st.columns(2)
+        with cprov:
+            provider = st.selectbox("🤖 Provider:", list(models_info["providers"].keys()))
+        with cmodel:
+            model = st.selectbox("Modelo:", models_info["providers"][provider])
 
         col_a, col_b = st.columns(2)
         with col_a:
@@ -78,15 +104,20 @@ with tab1:
             try:
                 resp = requests.post(
                     f"{API_URL}/optimize",
-                    json={"prompt": prompt_input, "test_outputs": test_outputs},
-                    timeout=60
+                    json={
+                        "prompt": prompt_input,
+                        "test_outputs": test_outputs,
+                        "provider": provider,
+                        "model": model,
+                    },
+                    timeout=120,
                 )
 
                 if resp.status_code == 200:
                     data = resp.json()
                     st.markdown("---")
+                    st.caption(f"Provider: **{data['provider']}** · Modelo: **{data['model']}**")
 
-                    # Grade + métricas principais
                     g1, g2, g3, g4, g5 = st.columns(5)
                     grade = data["grade"]
                     g1.markdown(f'<div class="metric-box"><div style="font-size:12px;color:#666">Grade</div><div class="grade-{grade}">{grade}</div></div>', unsafe_allow_html=True)
@@ -97,19 +128,14 @@ with tab1:
 
                     st.markdown("---")
 
-                    # Prompts lado a lado
                     c1, c2 = st.columns(2)
                     with c1:
                         st.markdown("**📝 Prompt original**")
                         st.markdown(f'<div class="prompt-box">{data["original_prompt"]}</div>', unsafe_allow_html=True)
-
                     with c2:
-                        st.markdown("**✅ Prompt otimizado**")
-                        st.markdown(f'<div class="optimized-box">{data["optimized_prompt"]}</div>', unsafe_allow_html=True)
-                        if st.button("📋 Copiar prompt otimizado"):
-                            st.code(data["optimized_prompt"])
+                        st.markdown("**✅ Prompt otimizado** _(clique no ícone de copiar)_")
+                        st.code(data["optimized_prompt"], language=None)
 
-                    # Scores
                     st.markdown("---")
                     s1, s2, s3 = st.columns(3)
                     s1.metric("Score de intenção", f"{data['intention_score']:.1%}",
@@ -123,18 +149,25 @@ with tab1:
                         for t in data["techniques_applied"]:
                             st.markdown(f"- {t}")
 
-                    # Outputs comparados
+                    st.download_button(
+                        "⬇️ Baixar resultado (JSON)",
+                        data=json.dumps(data, indent=2, ensure_ascii=False),
+                        file_name="promptlite_result.json",
+                        mime="application/json",
+                    )
+
                     if test_outputs and data["original_output"]:
                         st.markdown("---")
                         st.markdown("### 🔬 Comparação de outputs")
                         o1, o2 = st.columns(2)
                         with o1:
                             st.markdown("**Output — prompt original:**")
-                            st.text_area("", data["original_output"], height=150, key="orig_out")
+                            st.text_area("Output original", data["original_output"], height=150,
+                                         key="orig_out", label_visibility="collapsed")
                         with o2:
                             st.markdown("**Output — prompt otimizado:**")
-                            st.text_area("", data["optimized_output"], height=150, key="opt_out")
-
+                            st.text_area("Output otimizado", data["optimized_output"], height=150,
+                                         key="opt_out", label_visibility="collapsed")
                 else:
                     st.error(f"Erro: {resp.json().get('detail', 'Erro desconhecido')}")
 
@@ -149,16 +182,16 @@ with tab2:
     st.markdown("### 📊 Benchmark — Dataset de prompts reais")
     st.info("Executa o otimizador nos 6 prompts do dataset de benchmark e exibe métricas comparativas.")
 
+    bprov = st.selectbox("Provider do benchmark:", list(models_info["providers"].keys()), key="bench_prov")
+
     if st.button("▶️ Executar benchmark", type="primary"):
         with st.spinner("Executando benchmark em 6 prompts..."):
             try:
-                resp = requests.get(f"{API_URL}/benchmark", timeout=120)
+                resp = requests.get(f"{API_URL}/benchmark", params={"provider": bprov}, timeout=180)
                 if resp.status_code == 200:
                     data = resp.json()
-
                     st.metric("Redução média de tokens", f"{data['avg_reduction_pct']}%")
                     st.markdown("---")
-
                     for r in data["results"]:
                         if "error" not in r:
                             grade_color = {"A": "🟢", "B": "🔵", "C": "🟡", "D": "🔴"}.get(r["grade"], "⚪")
@@ -168,23 +201,23 @@ with tab2:
                                 c2.metric("Otimizado", r["optimized_tokens"])
                                 c3.metric("Redução", f"{r['reduction_pct']}%")
                                 c4.metric("Intenção", f"{r['intention_score']:.1%}")
-            except:
+                        else:
+                            st.warning(f"{r['id']}: {r['error']}")
+            except requests.exceptions.RequestException:
                 st.error("API não está rodando.")
 
 # ─── TAB 3 — TÉCNICAS ───
 with tab3:
     st.markdown("### 📚 Técnicas de otimização implementadas")
-
     try:
         resp = requests.get(f"{API_URL}/techniques", timeout=5)
         if resp.status_code == 200:
-            techniques = resp.json()["techniques"]
-            for t in techniques:
+            for t in resp.json()["techniques"]:
                 st.markdown(f"**{t['name']}**")
                 st.code(t["example"])
                 st.markdown("---")
-    except:
-        techniques = [
+    except requests.exceptions.RequestException:
+        for name, example in [
             ("Remove filler phrases", "'Please help me' → removed"),
             ("Imperative form", "'Can you summarize' → 'Summarize'"),
             ("Remove AI acknowledgments", "'As an AI language model' → removed"),
@@ -192,8 +225,7 @@ with tab3:
             ("Remove obvious context", "'It's important that you' → removed"),
             ("Compress examples", "3 examples → 1 best example"),
             ("Structured format", "prose requirements → bullet list"),
-        ]
-        for name, example in techniques:
+        ]:
             st.markdown(f"**{name}**")
             st.code(example)
             st.markdown("---")

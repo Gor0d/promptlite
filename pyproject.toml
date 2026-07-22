@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E402: imports após sys.path.insert são intencionais (api/main.py, tests).
+# E501: linhas longas nos prompts/system são aceitáveis.
+ignore = ["E402", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
