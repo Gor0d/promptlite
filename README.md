@@ -5,6 +5,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue)](https://python.org)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111-green)](https://fastapi.tiangolo.com)
 [![OpenAI](https://img.shields.io/badge/OpenAI-API-orange)](https://openai.com)
+[![Claude](https://img.shields.io/badge/Anthropic-Claude-8A63D2)](https://anthropic.com)
 
 ---
 
@@ -81,14 +82,43 @@ python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
 cp .env.example .env
-# Add your OPENAI_API_KEY to .env
+# Add your OPENAI_API_KEY and/or ANTHROPIC_API_KEY to .env
 
 # Terminal 1 — API
-cd api && uvicorn main:app --reload
+uvicorn api.main:app --reload
 
 # Terminal 2 — Dashboard
-cd dashboard && streamlit run app.py
+streamlit run dashboard/app.py
 ```
+
+### 🐳 Docker
+
+```bash
+cp .env.example .env   # add your keys
+docker compose up      # API on :8000, dashboard on :8501
+```
+
+### 🧪 Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest            # unit + API tests, no token cost (LLM calls are mocked)
+ruff check .
+```
+
+---
+
+## 🤖 Providers
+
+PromptLite is provider-agnostic — use **OpenAI** or **Anthropic (Claude)**:
+
+| Provider | Models | Default |
+|---|---|---|
+| `openai` | `gpt-4o-mini`, `gpt-4o`, `gpt-4-turbo` | `gpt-4o-mini` |
+| `anthropic` | `claude-haiku-4-5`, `claude-sonnet-5`, `claude-opus-4-8` | `claude-haiku-4-5` |
+
+Pick the provider/model per request (`"provider"`, `"model"`) or in the dashboard.
+Semantic similarity uses OpenAI embeddings when `OPENAI_API_KEY` is set, with a local lexical fallback otherwise.
 
 ---
 
@@ -99,6 +129,7 @@ cd dashboard && streamlit run app.py
 | `POST` | `/optimize` | Optimize a single prompt |
 | `POST` | `/batch` | Optimize multiple prompts |
 | `GET` | `/benchmark` | Run benchmark on 6 real-world prompts |
+| `GET` | `/models` | List providers and models |
 | `GET` | `/techniques` | List optimization techniques |
 | `GET` | `/health` | Health check |
 
@@ -109,7 +140,9 @@ curl -X POST http://localhost:8000/optimize \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "I would really appreciate it if you could please help me summarize the following text...",
-    "test_outputs": false
+    "test_outputs": false,
+    "provider": "anthropic",
+    "model": "claude-haiku-4-5"
   }'
 ```
 
